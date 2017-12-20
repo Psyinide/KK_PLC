@@ -108,8 +108,8 @@ func RunTest(){
 
 	// create the initilization arguments for the gateway
 	var initObj gatewayInit
-	initObj.plcName = "cushions"
-	initObj.connectAddress = "10.34.17.50"
+	initObj.plcName = "test_plc"
+	initObj.connectAddress = "10.0.0.50"
 	initObj.tagSlice = tagSlice
 	
 
