@@ -9,6 +9,7 @@ import (
 	"strings"
 	"errors"
 	"kellestine.com/KKPLC_Gateway/KK_Globals"
+	"kellestine.com/KKPLC_Gateway/KK_Tag_DB"
 )
 
 
@@ -23,17 +24,20 @@ type PLCGateway struct {
 }
 
 // struct used to start a new PLCGateway
-type gatewayInit struct{
-	plcName string
-	connectAddress string
-	tagSlice []gatewayTag
+type GatewayInit struct{
+	PlcName string
+	ConnectAddress string
+	TagSlice []GatewayTag
+	Path string
+	Args []string
 }
 
-type gatewayTag struct{
-	tagName string
-	alias string
-	isString bool
-	events []KK_Globals.TagEvent
+type GatewayTag struct{
+	TagName string
+	Alias string
+	IsString bool
+	IsWritable bool
+	Events []KK_Tag_DB.TagEvent
 }
 
 
@@ -72,92 +76,63 @@ var nilGateway PLCGateway
 
 
 
-func RunTest(){
-	//
-	// TESTING
-	//
-
-	// create a tag object
-	var tagSlice []gatewayTag
-
-	var tag gatewayTag
-	tag.tagName = "KK.0"
-	tag.alias = "KK.0"
-	tag.isString = false
-	
-	// create event
-	var event KK_Globals.TagEvent
-	event.EventName = "Test_Event"
-	event.TriggerType = "transition high"
-
-	// add events to the tag
-	var tagEvents []KK_Globals.TagEvent
-	tagEvents = append(tagEvents, event)	
-	tag.events = tagEvents
-
-	tagSlice = append( tagSlice, tag)
-
-	// make a second tag, no events on this one
-	var tag2 gatewayTag
-	tag2.tagName = "KK.2"
-	tag2.alias = "KK.2"
-	tag2.isString = false
-	
-	tagSlice = append( tagSlice, tag2)
-
-
-	// create the initilization arguments for the gateway
-	var initObj gatewayInit
-	initObj.plcName = "test_plc"
-	initObj.connectAddress = "10.0.0.50"
-	initObj.tagSlice = tagSlice
-	
-
-	// switch to tag database monitoring
-	//KK_Globals.Mode = "tagdb"
-	KK_Globals.Mode = "debugging"
-
-	// this call blocks
-	go StartAGateway(initObj)
-
+//
+// handle write requests to the PLCs
+//
+func ProcessGatewayTagSetQueue(){
+	for {
+		queuedTagSetStr := <-KK_Tag_DB.GatewayTagSetQueue
+		
+		KK_Globals.Dbg("ProcessGatewayTagSetQueue() Processing Queue", "info")
+		_, err := HandleTagUpdateString(queuedTagSetStr)
+		if err != nil {
+			KK_Globals.Dbg(err.Error(), "error")
+		}
+	}
 }
 
 
 
+// this function blocks
 //
 // starts a new PLC Gateway, adds the tags to monitor, connects and starts monitoring
 // this function will block until the PLC Gateway exe exits
+// the function will attempt to auto relaunch the gateway if the gateway proc ends
+// if the proc fails to start the function exits
 //
-func StartAGateway( init gatewayInit ){
+func StartAGateway( init GatewayInit ) {
 
 	// if enabled, a new gateway instance will spawn up if this one exits
+	// todo: \/ configurable \/
 	autoReconnect := true
 
 	// Process the tag slice
 	var tagSlice [] string
 	var strTagSlice [] string
-	for _, t := range init.tagSlice {
+	for _, t := range init.TagSlice {
 
 		// build struct expected by the AddTag method
-		var tag KK_Globals.TagObj
-		tag.PLCName = init.plcName
-		tag.TagName = t.tagName
-		tag.Events = t.events
+		var tag KK_Tag_DB.TagObj
+		tag.PLCName = init.PlcName
+		tag.TagAddress = t.TagName 	// yes these seems backwards
+		tag.TagName = t.Alias		// clean up later
+		tag.IsWritable = t.IsWritable
+		tag.Events = t.Events
 
 		// add the tag to the tag database
-		KK_Globals.TagDatabase.AddTag( tag )
+		KK_Tag_DB.TagDatabase.AddTag( tag )
 
 		// parse out the Tag and strTag names for the gateway
-		if ( t.isString ) {
-			strTagSlice = append( strTagSlice, t.tagName )
+		if ( t.IsString ) {
+			strTagSlice = append( strTagSlice, t.TagName )
 		}else{
-			tagSlice = append( tagSlice, t.tagName )
+			tagSlice = append( tagSlice, t.TagName )
 		}
 	}
 
 
 	// instiate a new gateway process
-	plcGatewayApp := plcGatewayBinder(init.plcName, KK_Globals.GatewayPath, KK_Globals.GatewayArgs)
+	plcGatewayApp := plcGatewayBinder(init.PlcName, init.Path, init.Args)
 
 	// add this gateway to the global slice
 	PLCGateways = append(PLCGateways, plcGatewayApp)
@@ -165,11 +140,16 @@ func StartAGateway( init gatewayInit ){
 	// start the gateway child process
 	err := plcGatewayApp.cmdBind.Start()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error starting Cmd", err)
+		KK_Globals.Dbg( init.PlcName + " fatal gateway error, cannot start gateway: " + err.Error(), "error" )
+
+
+		// todo: come back to this idea of raising events in the system
+		KK_Tag_DB.TagDatabase.SetSystemTag( "plcTagInitFailure", init.PlcName)
+		return
 	}
 
 	// connect to the PLC
-	plcGatewayApp.SendCommand("connect " + init.connectAddress)
+	plcGatewayApp.SendCommand("connect " + init.ConnectAddress)
 
 	// disable the tag event logging
 	plcGatewayApp.SendCommand("logging disable")
@@ -184,9 +164,8 @@ func StartAGateway( init gatewayInit ){
 	// hold the go app open until the nested app closes
 	err = plcGatewayApp.cmdBind.Wait()
 	if err != nil {
-		if ( KK_Globals.Mode == "debugging" ){
-			fmt.Println("gateway has exited unexpectedly", err)
-		}
+		KK_Globals.Dbg( init.PlcName + " gateway has exited unexpectedly", "warning" )
+		KK_Globals.Dbg( init.PlcName + " gateway Error: " + err.Error(), "error" )
 	}
 
 	/////////////////////////////////////////////////////////////////////////////
@@ -194,11 +173,10 @@ func StartAGateway( init gatewayInit ){
 	/////////////////////////////////////////////////////////////////////////////
 
 	// clean up the plcGatewayApp slice to removed the exited gateway
-	i, err := getPLCGatewayIndex(init.plcName)
+	i, err := getPLCGatewayIndex(init.PlcName)
 	if err != nil {
-		if ( KK_Globals.Mode == "debugging" ){
-			fmt.Println("Error finding " + init.plcName + " in Gateway Slice", err)
-		}
+		KK_Globals.Dbg( "Error finding " + init.PlcName + " in Gateway Slice", "warning" )
+		KK_Globals.Dbg( err.Error(), "warning" )
 	}else{
 
 		// remove the gateway from the slice
@@ -207,6 +185,7 @@ func StartAGateway( init gatewayInit ){
 
 	// reconnect if auto reconnect is enabled
 	if autoReconnect {
+		KK_Globals.Dbg( "Restarting " + init.PlcName, "info" )
 		StartAGateway(init)
 	}
 }
@@ -221,6 +200,9 @@ func StartAGateway( init gatewayInit ){
 //
 func HandleTagUpdateString( tagUpdateStr string ) (response string, err error) {
 
+	KK_Globals.Dbg("HandleTagUpdateString() Processing:" + tagUpdateStr, "info")
+
+	// validate the input string
 	if ( !strings.Contains(tagUpdateStr, "@") ){
 		err = errors.New("expecting tagName=newValue@plcName")
 		response = "Error, expecting tagName=newValue@plcName"
@@ -229,40 +211,35 @@ func HandleTagUpdateString( tagUpdateStr string ) (response string, err error) {
 		// break string into the parts
 		// expected format: tagName=newValue@plcName
 		splitter := strings.Split(tagUpdateStr, "@")
+
+		// validate we have content after the @ sign
+		if len(splitter) < 2 {
+			err = errors.New("expecting tagName=newValue@plcName")
+			response = "Error, expecting tagName=newValue@plcName"
+			return response, err
+		}
+
+		// assign friendly names
 		plcName := splitter[1]
 		tagUpdateCmd := splitter[0]
 
-		//fmt.Fprintln(os.Stdout, "PLC Name: ", plcName )
-
-		if plcName == "virtual"{
-
-			// add to the tag update queue
-			KK_Globals.TagDatabase.QueueTagUpdate( "TAGUPDATE: " + tagUpdateStr )
-			response = "virtual tag queued for update"
-
+		// find the PLC Gateway by name
+		gwPt, errr := getPLCGateway(plcName)
+		if errr != nil {
+			err = errr
+			response = "Error finding " + plcName + " in Gateway Slice"
 		}else{
 
-			// find the PLC Gateway by name
-			gwPt, errr := getPLCGateway(plcName)
-			if errr != nil {
-				err = errr
-				//fmt.Fprintln(os.Stdout, "getPLCGateway returned error: ", errr )
-				response = "Error finding " + plcName + " in Gateway Slice"
-			}else{
+			// get the GW object
+			gatewayObj := *gwPt
 
-				// get the GW object
-				gatewayObj := *gwPt
+			// update the tag update command to match what the GW expects
+			tagUpdateCmd = "tagset " + tagUpdateCmd
 
-				// update the tag update command to match what the GW expects
-				tagUpdateCmd = "tagset " + tagUpdateCmd
-				//fmt.Fprintln(os.Stdout, "Sending Command : ", tagUpdateCmd )
-
-				// send the formated command
-				gatewayObj.SendCommand(tagUpdateCmd)
-				response = tagUpdateCmd + " sent to " + plcName
-				//fmt.Fprintln(os.Stdout, "getPLCGateway returned a GW pointer: ", gatewayObj.plcName )
-			}
-		}
+			// send the formated command
+			gatewayObj.SendCommand(tagUpdateCmd)
+			response = tagUpdateCmd + " sent to " + plcName
+		}	
 	}
 	return response, err
 }
@@ -354,22 +331,116 @@ func plcGatewayBinder( plcName, exeFileName string, cmdArgs []string ) (gatewayO
 func handlePLCGatewaySTDOut( plcGatewayName, stdout string ){
 
 	// send all the stdout to the go console if debugging
-	if ( KK_Globals.Mode == "debugging" ){
-		fmt.Printf(plcGatewayName +  " sent  | %s\n", stdout)
-	}
+	KK_Globals.Dbg(plcGatewayName +  " sent  |" + stdout, "info")
 
 	// check for tag updates
 	if ( strings.Contains(stdout, "TAGUPDATE: ") ){
-		
+	
+/*	
+		// break string into the parts
+		// expected format: tagName=newValue@plcName
+		splitter := strings.Split(stdout, "@")
+
+		// validate we have content after the @ sign
+		if len(splitter) < 2 {
+			// bad
+		}else{
+
+			// assign friendly names
+			tagName := splitter[0]
+
+			// try to replace the tag address with the tag name
+			tagBind, err := KK_Tag_DB.TagDatabase.GetTagIndexByAddress( plcGatewayName, tagName )
+			if ( err == nil ){
+				tagName := KK_Tag_DB.TagDatabase.Tags[tagBind].TagName
+				tagAddress := KK_Tag_DB.TagDatabase.Tags[tagBind].TagAddress
+				stdout = strings.Replace(stdout, tagAddress, tagName, 1)
+			}
+		}
+*/
+		// finish build the tag update string
 		stdout = stdout + "@" + plcGatewayName
 
 		// add to the tag update queue
-		KK_Globals.TagDatabase.QueueTagUpdate( stdout )
+		KK_Tag_DB.TagDatabase.QueueTagUpdate( stdout )
 
 	}else{
 		//fmt.Println("something other than a tag update recieved")
 	}
-
-
 }// handlePLCGatewaySTDOut
 
+
+
+/*
+
+func RunTest(){
+	//
+	// TESTING
+	//
+
+	// create a slice tag objects
+	var tagSlice []GatewayTag
+
+	// create first tag
+	var tag GatewayTag
+	tag.TagName = "KK.0"
+	tag.Alias = "KK.0"
+	tag.IsString = false
+	
+	// create event for the tag
+	var event KK_Globals.TagEvent
+	event.EventName = "Test_Event"
+	event.TriggerType = "transition high"
+
+	// add events to the tag
+	var tagEvents []KK_Globals.TagEvent
+	tagEvents = append(tagEvents, event)	
+	tag.Events = tagEvents
+
+	// add tag to slice
+	tagSlice = append( tagSlice, tag)
+
+	// make a second tag, no events on this one
+	var tag2 GatewayTag
+	tag2.TagName = "KK.2"
+	tag2.Alias = "KK.2"
+	tag2.IsString = false
+	
+	// add tag to slice
+	tagSlice = append( tagSlice, tag2)
+
+
+	//
+	// create the initilization arguments for the gateway
+	// this is a vbs gateway
+	//
+	var initObj GatewayInit
+	initObj.PlcName = "vbs"
+	initObj.ConnectAddress = "10.34.17.50"
+	initObj.TagSlice = tagSlice
+	initObj.Path = "C:\\Windows\\System32\\cscript.exe"
+	initObj.Args = []string{"test.vbs"}
+
+
+	// switch to tag database monitoring
+	//KK_Globals.Mode = "tagdb"
+	KK_Globals.Mode = "debugging"
+
+	// this call blocks
+	go StartAGateway(initObj)
+
+
+	//
+	// lets connect to a real PLC
+	//
+	var initObj2 GatewayInit
+	initObj2.PlcName = "cushions"
+	initObj2.ConnectAddress = "10.34.17.50"
+	initObj2.TagSlice = tagSlice
+	initObj2.Path = "C:\\Go\\gocode\\src\\kellestine.com\\KKPLC_Gateway\\KK_PLC\\KK_PLC_Svr.exe"
+	initObj2.Args = []string{"ignoreScript=true"}
+
+	// this call blocks
+	//go StartAGateway(initObj2)
+}
+*/

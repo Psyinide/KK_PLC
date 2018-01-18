@@ -3,15 +3,62 @@ import (
 	"io/ioutil"
 	"fmt"
 	//"unicode/utf8"
+	"path/filepath"
 	"kellestine.com/KKPLC_Gateway/KK_Globals"
+	"kellestine.com/KKPLC_Gateway/KK_Tag_DB"
 	"github.com/robertkrimen/otto"
 )
 
 
-func InitEventEngine() {
+/*
+ *
+ *	this is the javascript event handler module
+ * 	the init function should be run as a go routine:
+ *	go KK_Events.InitEventEngine()
+ *
+ */
+
+func RunEventEngine() {
 
 	// Start the VM
 	vm := otto.New()
+
+	// expose a function to allow writing to the log file
+	vm.Set("log", func(call otto.FunctionCall) otto.Value {
+	    
+	    // get the JS func call arguments into Go
+	    strToLog := call.Argument(0).String()
+	    severity := call.Argument(1).String()
+
+	    // make sure we have a proper value for the severity, default to "event"
+	    if ( severity != "info" && severity != "warning" && severity != "error") {
+	    	severity = "event"
+	    }
+
+	    // log it
+	    KK_Globals.Dbg("Event Log: " + strToLog, severity)
+
+	    // this is a null return
+	    return otto.Value{}
+	})
+
+
+	// expose a function to get the contents of a web page
+	vm.Set("HTTPGet", func(call otto.FunctionCall) otto.Value {
+	    
+	    // get the JS func call arguments into Go
+	    url := call.Argument(0).String()
+
+	    d, err := KK_Globals.HTTPGet(url)
+	    if err != nil{
+			result, _ := vm.ToValue(err.Error())
+			return result
+    	}else{
+			result, _ := vm.ToValue(d)
+			return result
+    	}
+	})
+
 
 	// create the getTagValue function in the VM
 	vm.Set("getTagValue", func(call otto.FunctionCall) otto.Value {
@@ -21,7 +68,7 @@ func InitEventEngine() {
 	    tagName := call.Argument(1).String()
 
 	    // get the tag's value
-		tagVal, err := KK_Globals.TagDatabase.GetTagValue( plcName, tagName )
+		tagVal, err := KK_Tag_DB.TagDatabase.GetTagValue( plcName, tagName )
 		if ( err == nil ){
 
 			// return the tag's value to the JS caller
@@ -49,130 +96,84 @@ func InitEventEngine() {
 	    tagUpdateStr := "TAGUPDATE: " + tagName + "=" + tagValue + "@" + plcName
 
 	    // queue the tag update
-		KK_Globals.TagDatabase.QueueTagUpdate( tagUpdateStr )
+		KK_Tag_DB.TagDatabase.QueueTagSet( tagUpdateStr )
 
 		// must return, this returns nothing for a method call
 		return otto.Value{}
 	})
 
 
-	// load in the JS Event Config
-	byteSlice, err := ioutil.ReadFile("./KK_Events/config_events.js")
-	if err != nil {
-		fmt.Println("Err: ", err)
+	// events should be in a sub dir relative to the current dir
+	eventsConfigDir := filepath.Join(".", "KK_Events")
+
+	// validate that the events directory exists
+	_, er := ioutil.ReadDir( eventsConfigDir )
+	if er != nil {
+		KK_Globals.Dbg(er.Error(), "error")
+		KK_Globals.Dbg("KK_Events directory read error, can't read events", "error")
 	}else{
 
-
-		// execute the config file in the JS VM
-		_,err:= vm.Run( byteSlice )
-		if err != nil{
-			fmt.Println("Error executing config_events.js: ", err)
+		// load in the optional JS Event Environment if it exists
+		eventsEnvPath := filepath.Join(eventsConfigDir, "events_env.js")
+		byteSlice, err := ioutil.ReadFile(eventsEnvPath)
+		if err == nil {
+			// execute the config file in the JS VM
+			_,err:= vm.Run( byteSlice )
+			if err != nil{
+				KK_Globals.Dbg("Error executing events_env.js: ", "error")
+				KK_Globals.Dbg(err.Error(), "error")
+			}
 		}
 
-/*
-		// once the config is loaded block on an empty queue channel
-		vm.Run(`
-		    Test_Event("cushions", "KK.2", "False", "True");
-		`) 
-*/
+		// load in the JS Event Config
+		eventsConfigPath := filepath.Join(eventsConfigDir, "config_events.js")
+		byteSlice, err = ioutil.ReadFile(eventsConfigPath)
+		if err != nil {
+			KK_Globals.Dbg("Error loading config_events.js: ", "error")
+			KK_Globals.Dbg(err.Error(), "error")
+		}else{
+
+			// execute the config file in the JS VM
+			_,err:= vm.Run( byteSlice )
+			if err != nil{
+				KK_Globals.Dbg("Error executing config_events.js: ", "error")
+				KK_Globals.Dbg(err.Error(), "error")
+			}
+		}
 	}
 
+
+	// CLI processor loop
+	go func(){
+		for {
+			// block until we have work to do
+			jsCode := <-KK_Globals.CLIcode
+			
+			// execute it in the VM
+			_,err:= vm.Run( jsCode )
+			if err != nil{
+				fmt.Println("JS Error: ", err)
+			}
+		}
+	}()
+
+
+	// event processor loop
 	jsCode := ""
 	for {
-
-		//fmt.Println("Ready for events")
-
 		// block until we have work to do
-		eventObj := <-KK_Globals.EventQueue
+		eventObj := <-KK_Tag_DB.EventQueue
 		
 		// build the JS code to execute
+		// $EventName( $PLCName, $TagName, $OldValue, $NewValue )
 		jsCode = eventObj.EventName + "('" + eventObj.PLCName
 		jsCode += "', '" + eventObj.TagName + "', '"
 		jsCode += eventObj.OldValue + "', '" + eventObj.NewValue + "')"
 
-		//fmt.Println(jsCode)
+		// execute it in the VM
 		vm.Run(jsCode) 
 	}
 
-
-	// test the function
-	/*
-	vm.Run(`
-	    console.log(getTagValue("cushions", "KK.0"));
-	    setTagValue("cushions", "KK.2", "False");
-	`) 
-	*/
+}// RunEventEngine
 
 
-
-/*
-
-	// get a value from the VM
-	value, err := vm.Get("abc"); 
-	if err != nil {
-		fmt.Printf("Go: abc = %s\n", value)
-	}
-
-	// Set a number
-	vm.Set("def", 11)
-	vm.Run(`
-	    console.log("JS: " + "The value of def is " + def);
-	    // The value of def is 11
-	`)
-
-	// Set a string
-	vm.Set("xyzzy", "Nothing happens.")
-	vm.Run(`
-	    console.log("JS: " + xyzzy.length); // 16
-	`)
-
-	// Get the value of an expression
-	value, err = vm.Run("xyzzy.length")
-	{
-	    // value is an int64 with a value of 16
-	    value, _ := value.ToInteger()
-	    value = value
-	}
-
-	// An error happens
-	value, err = vm.Run("abcdefghijlmnopqrstuvwxyz.length")
-	if err != nil {
-	    // err = ReferenceError: abcdefghijlmnopqrstuvwxyz is not defined
-	    // If there is an error, then value.IsUndefined() is true
-	    fmt.Println("Go: JS Error in Console")
-	}
-
-	// Set a Go functions
-	vm.Set("sayHello", func(call otto.FunctionCall) otto.Value {
-	    fmt.Printf("Hello, %s.\n", call.Argument(0).String())
-	    return otto.Value{}
-	})
-
-	vm.Set("twoPlus", func(call otto.FunctionCall) otto.Value {
-	    right, _ := call.Argument(0).ToInteger()
-	    result, _ := vm.ToValue(2 + right)
-	    return result
-	})
-
-	//Use the functions in JavaScript
-	vm.Run(`
-	    sayHello("Xyzzy");      // Hello, Xyzzy.
-	    sayHello();             // Hello, undefined
-
-	    result = twoPlus(2.0); // 4
-	`) 
-
-	vm.Set("getTag", func(call otto.FunctionCall) otto.Value {
-	    vm.Set("tagName", "KK_Tag")
-	    vm.Set("tagValue", "KK")
-	    return otto.Value{}
-	})
-
-	vm.Run(`
-	    getTag("Xyzzy");
-	    console.log("JS: tagName = " + tagName)
-	    console.log("JS: tagValue = " + tagValue)
-	`) 
-
-	*/
-}

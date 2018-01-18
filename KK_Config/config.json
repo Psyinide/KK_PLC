@@ -1,0 +1,94 @@
+{
+	"keyVals":[
+		{
+			"key" : "rest_server_port", 
+			"value" : "0"
+		},
+		{
+			"key" : "log_level", 
+			"value" : "event"
+		},
+		{
+			"key" : "CLI_Mode", 
+			"value" : "debugging"
+		}
+	],
+	"gateways":[
+		{
+			"plcName" : "KK_Virtual",
+			"enabled" : true,
+			"connectAddress" : "virtual",
+			"tags" : [
+				{
+					"tagName" : "Flag_1",
+					"tagAddress" : "Flag_1",
+					"tagType" : "bool",
+					"isWritable" : true,
+					"events" : [
+						{"name" : "virtual_event", "trigger" : "transition high"}
+					]
+				}
+			]
+		},
+		{
+			"plcName" : "conveyor",
+			"enabled" : false,
+			"connectAddress" : "10.0.0.5",
+			"path" : ".\\KK_PLC\\KK_PLC_Svr.exe",
+			"args" : ["ignoreScript=true"],
+			"tags" : [
+				{
+					"tagName" : "KK.0",
+					"tagAddress" : "KK.0",
+					"tagType" : "bool",
+					"isWritable" : true,
+					"events" : [
+						{"name" : "Test_Event", "trigger" : "transition high"}
+					]
+				},
+				{
+					"tagName" : "KK.3",
+					"tagAddress" : "KK.3",
+					"tagType" : "bool",
+					"isWritable" : true
+				}
+			]
+		},
+		{
+			"plcName" : "robot",
+			"enabled" : false,
+			"connectAddress" : "10.0.0.6",
+			"path" : "C.\\KK_PLC\\KK_PLC_Svr.exe",
+			"args" : ["ignoreScript=true"],
+			"tags" : [
+				{
+					"tagName" : "Sort",
+					"tagAddress" : "MES_W_Robot.0",
+					"tagType" : "bool",
+					"isWritable" : true
+				},
+				{
+					"tagName" : "Dont_Sort",
+					"tagAddress" : "MES_W_Robot.1",
+					"tagType" : "bool",
+					"isWritable" : true
+				},
+				{
+					"tagName" : "Check_Barcode",
+					"tagAddress" : "MES_R_Robot.0",
+					"tagType" : "bool",
+					"isWritable" : false
+				},
+				{
+					"tagName" : "Barcode",
+					"tagAddress" : "MES_R_Robot_Barcode",
+					"tagType" : "dint",
+					"isWritable" : false,
+					"events" : [
+						{"name" : "log_barcode", "trigger" : "transition high"}
+					]
+				}
+			]
+		}
+	]
+}

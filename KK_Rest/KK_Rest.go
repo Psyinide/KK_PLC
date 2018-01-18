@@ -10,11 +10,21 @@ import (
 	"encoding/json"
 	"strings"
 	"kellestine.com/KKPLC_Gateway/KK_Globals"
-	"kellestine.com/KKPLC_Gateway/KK_PLC_Wrapper"
+	"kellestine.com/KKPLC_Gateway/KK_Tag_DB"
+	//"kellestine.com/KKPLC_Gateway/KK_PLC_Wrapper"
 )
 
+// should load this from config:
+var listeningPort string// = "3001"
 
-func StartRest() {
+/*
+ *
+ *	this is the web server
+ *
+ */
+func StartRest( port string ) {
+
+	listeningPort = port
 
 	fmt.Println("Starting HTTP Server Router")
 	mx := mux.NewRouter()
@@ -25,24 +35,29 @@ func StartRest() {
 	//
 
 	// all tags in the tag DB as JSON
-	mx.HandleFunc("/json/alltags", sendAllTagsAsJSON)
-	// http://127.0.0.1:3000/json/alltags
+	mx.HandleFunc("/api/v1/json/alltags", sendAllTagsAsJSON)
+	// http://127.0.0.1:3000/api/v1/json/alltags
 
 	// all tags in {plcname} as JSON
-	mx.HandleFunc("/json/plctags/{plcname}", sendAllTagsByPLCAsJSON)
-	// http://127.0.0.1:3000/json/plctags/cushions
+	mx.HandleFunc("/api/v1/json/plctags/{plcname}", sendAllTagsByPLCAsJSON)
+	// http://127.0.0.1:3000/api/v1/json/plctags/cushions
 
 	// one specific tag in {plcname}/{tagname} as JSON
-	mx.HandleFunc("/json/plctags/{plcname}/{tagname}", sendTagAsJSON)
-	// http://127.0.0.1:3000/json/plctags/cushions/KK.2
+	mx.HandleFunc("/api/v1/json/plctags/{plcname}/{tagname}", sendTagAsJSON)
+	// http://127.0.0.1:3000/api/v1/json/plctags/cushions/KK.2
+
+	// return specific tags from the tagdb as JSON
+	mx.HandleFunc("/api/v1/json/specifictags/{tagsarray}", sendSpecificTagsAsJSON)
+	// http://127.0.0.1:3000/api/v1/json/specifictags/[KK.2@cushions,flag@virtual]
+
 	
 	//
 	// API Input
 	//
 
 	// sets a tag using tagname=tagvalue@plcname syntax
-	mx.HandleFunc("/tags/set/{tagdata}", tagSet)
-	// http://127.0.0.1:3000/tags/set/Ken=False@virtual
+	mx.HandleFunc("/api/v1/tags/set/{tagdata}", tagSet)
+	// http://127.0.0.1:3000/api/v1/tags/set/Ken=False@virtual
 
 
 	//
@@ -56,7 +71,7 @@ func StartRest() {
 	// http://127.0.0.1:3000
 
 	// listen on all addresses
-	http.ListenAndServe(":3000", mx)
+	http.ListenAndServe(":" + listeningPort, mx)
 
 } //end startRest
 
@@ -83,15 +98,12 @@ func tagSet(w http.ResponseWriter, r *http.Request) {
 	
 		// tagName=newValue@plcName
 
-		// Send the tag update command to the handler
-		response, err := KK_PLC_Wrapper.HandleTagUpdateString(tagdata)
-		if err != nil {
-			w.Write([]byte(fmt.Sprintf("Error: %s", err)))			
-		}else{
-			w.Write([]byte(fmt.Sprintf("Response: %s", response)))
-		}
+		// this needs to be tested
+		KK_Tag_DB.TagDatabase.QueueTagSet( "TAGUPDATE: " + tagdata)
+		w.Write([]byte("Tag Set queued"))
 	}
 }
+
 
 
 //
@@ -99,7 +111,9 @@ func tagSet(w http.ResponseWriter, r *http.Request) {
 //
 func sendAllTagsAsJSON(w http.ResponseWriter, r *http.Request) {
 
-	json, err := json.Marshal(KK_Globals.TagDatabase.Tags)
+// r.Queries("key", "value")
+
+	json, err := json.Marshal(KK_Tag_DB.TagDatabase.Tags)
 	if err != nil {
 		fmt.Println("error:", err)
 		w.Write([]byte("JSON Marshal Error"))
@@ -120,10 +134,10 @@ func sendAllTagsByPLCAsJSON(w http.ResponseWriter, r *http.Request) {
 	plcname := mux.Vars(r)["plcname"]
 
 	// create a new slice of tags to return
-	var tmpTagDB []KK_Globals.TagObj
+	var tmpTagDB []KK_Tag_DB.TagObj
 
 	// populate the new slice with the correct tags
-	for _, v := range KK_Globals.TagDatabase.Tags {
+	for _, v := range KK_Tag_DB.TagDatabase.Tags {
 		if v.PLCName == plcname {
 			tmpTagDB = append(tmpTagDB, v)
 		}
@@ -140,6 +154,85 @@ func sendAllTagsByPLCAsJSON(w http.ResponseWriter, r *http.Request) {
 
 
 //
+// takes a json array of tagName@plcName
+// returns the tags as json
+//
+func sendSpecificTagsAsJSON(w http.ResponseWriter, r *http.Request) {
+
+	// get the json from the url
+	jsonTagArray := mux.Vars(r)["tagsarray"]
+	jsonByteArray := []byte(jsonTagArray)
+
+	// validate the json
+	if !json.Valid(jsonByteArray){
+		KK_Globals.Dbg("sendSpecificTagsAsJSON: Invalid JSON tag array","warning")
+		w.Write([]byte("Invalid JSON tag array"))
+		return
+	}
+
+	// attempt to parse the validated json into a string slice
+	var tagRequestSlice []string
+	err := json.Unmarshal(jsonByteArray, &tagRequestSlice)
+	if err != nil {
+		KK_Globals.Dbg("sendSpecificTagsAsJSON: Invalid JSON tag array","warning")
+		KK_Globals.Dbg( err.Error(), "warning" )
+		w.Write([]byte("Invalid JSON tag array"))
+		return
+	}
+
+	// create a new slice of tags to return
+	var tmpTagDB []KK_Tag_DB.TagObj
+
+	// loop each tag in the json tag slice
+	for _, tagStr := range tagRequestSlice {
+
+		KK_Globals.Dbg( tagStr, "info")
+
+		if ( !strings.Contains(tagStr, "@") ){
+			KK_Globals.Dbg("sendSpecificTagsAsJSON: Error, expecting tagName@plcName","warning")
+			w.Write([]byte("Error, expecting tagName@plcName"))
+		}else{
+		
+			// break string into the parts
+			// expected format: tagName=newValue@plcName
+			splitter := strings.Split(tagStr, "@")
+
+			// validate we have content after the @ sign
+			if len(splitter) < 2 {
+				KK_Globals.Dbg("sendSpecificTagsAsJSON: Error, expecting tagName@plcName","warning")
+				w.Write([]byte("Error, expecting tagName@plcName"))
+				return
+			}
+
+			// assign friendly names
+			tagName := splitter[0]
+			plcName := splitter[1]
+			
+			KK_Globals.Dbg( "Tag Name" + tagName, "info")
+			KK_Globals.Dbg( "PLC Name" + plcName, "info")
+
+			// populate the new slice with the correct tags
+			for _, v := range KK_Tag_DB.TagDatabase.Tags {
+				if (v.PLCName == plcName && ( v.TagName == tagName || v.TagAddress == tagName ) ) {
+					tmpTagDB = append(tmpTagDB, v)
+				}
+			}
+		}
+	}
+
+
+	// return it as JSON
+	json, err := json.Marshal(tmpTagDB)
+	if err != nil {
+		fmt.Println("error:", err)
+		w.Write([]byte("JSON Marshal Error"))
+	}
+	w.Write(json)
+}
+
+
+
+//
 // takes a plcname/tagname as 2 parameters
 // returns the tag as json
 //
@@ -150,10 +243,10 @@ func sendTagAsJSON(w http.ResponseWriter, r *http.Request) {
 	tagname := mux.Vars(r)["tagname"]
 
 	// create a new slice of tags to return
-	var tmpTagDB []KK_Globals.TagObj
+	var tmpTagDB []KK_Tag_DB.TagObj
 
 	// populate the new slice with the correct tags
-	for _, v := range KK_Globals.TagDatabase.Tags {
+	for _, v := range KK_Tag_DB.TagDatabase.Tags {
 		if (v.PLCName == plcname && v.TagName == tagname ) {
 			tmpTagDB = append(tmpTagDB, v)
 		}
